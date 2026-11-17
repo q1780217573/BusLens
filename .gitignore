@@ -1,0 +1,35 @@
+# 打包产物
+build/
+dist/
+*.manifest
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 备份与临时文件
+*-bak*
+*_bak*
+*.orig
+
+# PEAK 第三方运行时：不随本仓库分发（见 README）
+PCAN-Basic/
+
+# 本地配置与日志
+.dbc_parser_config.json
+.dbuslens_config.json
+*.log
+combined_log.txt
+
+# 图标生成过程的预览图（源码与成品图标已提交）
+icon_preview*.png
+nav_icons_preview.png
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
