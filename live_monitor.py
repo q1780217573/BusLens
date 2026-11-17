@@ -16,6 +16,8 @@ import os
 import queue
 import threading
 import time
+import ctypes
+from ctypes import wintypes
 
 import customtkinter as ctk
 import tkinter as tk
@@ -347,6 +349,18 @@ class CanConfigDialog(ctk.CTkToplevel):
             self.update_idletasks()
             h = self.winfo_reqheight()
             self.geometry(f"600x{max(560, min(h + 8, 980))}")
+        except Exception:
+            pass
+        present_window(self, master)
+        # CTk 建窗后 10ms 会 withdraw 再 deiconify，withdraw 会顺带撤掉模态；
+        # 等提层落定再补一次 grab，免得对话框变成"浮在主窗口下面又不拦点击"
+        self.after(420, self._regrab)
+
+    def _regrab(self):
+        try:
+            if self.winfo_exists() and self.winfo_viewable():
+                self.grab_set()
+                self.focus_force()
         except Exception:
             pass
 
@@ -3517,6 +3531,7 @@ class RawSendWindow(ctk.CTkToplevel):
         top.title("编辑数据")
         top.geometry("460x320")
         top.transient(self)
+        present_window(top, self)
         txt = tk.Text(top, font=("Consolas", 12), wrap="char",
                       undo=True, relief="solid", borderwidth=1)
         txt.pack(fill="both", expand=True, padx=10, pady=10)
@@ -4761,19 +4776,170 @@ class SendWindow(ctk.CTkToplevel):
             pass
 
 
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+_SWP_NOSIZE = 0x0001
+_SWP_NOMOVE = 0x0002
+_SWP_NOZORDER = 0x0004
+_SWP_NOACTIVATE = 0x0010
+_HWND_TOP = 0
+
+
+def _center_window_native(win, master, raise_it=False):
+    """
+    用 Win32 SetWindowPos 把弹窗放到主窗口正中。
+
+    不走 tkinter 的 geometry / wm_geometry：CTk 会按 DPI 缩放二次换算坐标，
+    而且它自己在 10ms / 200ms 还有改标题栏、设图标的延迟回调，
+    会把窗口位置打断（表现为所有弹窗叠在同一处）。
+    这里直接按物理像素操作外框窗口，绕开全部缩放与竞争。
+
+    raise_it=True 时同一次调用顺带把 z-order 提到最前：
+    CTk 的 Toplevel 在 10ms withdraw、15ms 再 deiconify，
+    那一次 deiconify 会把窗口重新压回主窗口下面，
+    创建瞬间的 lift() 顶不到那个时候。定位与提层合并成一次 API，
+    免得多拍之间再多一轮竞争。
+    """
+    try:
+        u = ctypes.windll.user32
+        u.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(_RECT)]
+        u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND,
+                                   ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        mh = int(master.wm_frame(), 16)
+        wh = int(win.wm_frame(), 16)
+        if not mh or not wh:
+            return False
+        mr, wr = _RECT(), _RECT()
+        u.GetWindowRect(wintypes.HWND(mh), ctypes.byref(mr))
+        u.GetWindowRect(wintypes.HWND(wh), ctypes.byref(wr))
+        w = wr.right - wr.left
+        h = wr.bottom - wr.top
+        sw, sh = u.GetSystemMetrics(0), u.GetSystemMetrics(1)
+        x = mr.left + ((mr.right - mr.left) - w) // 2
+        y = mr.top + ((mr.bottom - mr.top) - h) // 2
+        x = max(0, min(x, max(sw - w, 0)))
+        y = max(0, min(y, max(sh - h, 0)))
+        if raise_it:
+            u.SetWindowPos(wintypes.HWND(wh), wintypes.HWND(_HWND_TOP),
+                           x, y, 0, 0, _SWP_NOSIZE | _SWP_NOACTIVATE)
+        else:
+            u.SetWindowPos(wintypes.HWND(wh), wintypes.HWND(0),
+                           x, y, 0, 0, _SWP_NOSIZE | _SWP_NOZORDER | _SWP_NOACTIVATE)
+        return True
+    except Exception:
+        return False
+
+
+def _raise_native(win):
+    """只把窗口提到 z-order 最前：不动位置、不动尺寸、不抢焦点"""
+    try:
+        u = ctypes.windll.user32
+        u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND,
+                                   ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        wh = int(win.wm_frame(), 16)
+        if not wh:
+            return False
+        u.SetWindowPos(wintypes.HWND(wh), wintypes.HWND(_HWND_TOP),
+                       0, 0, 0, 0,
+                       _SWP_NOSIZE | _SWP_NOMOVE | _SWP_NOACTIVATE)
+        return True
+    except Exception:
+        return False
+
+
+def _release_topmost(win):
+    """临时置顶的延时收回：只求弹窗跳一次前台，不长期压住别的窗口"""
+    try:
+        if win.winfo_exists():
+            win.attributes("-topmost", False)
+    except Exception:
+        pass
+
+
+def present_window(win, master):
+    """
+    首次打开弹窗：跳到前台 + 居中到主窗口。
+
+    必须分拍（50 / 180 / 360ms），原因在 CTk 的 Toplevel 有一串延迟回调：
+        10ms   withdraw()          改标题栏颜色
+        15ms   deiconify()         重新 map —— z-order 在这一刻被重排，会压回主窗口下面
+        200ms  iconbitmap()        设图标
+        1000ms _set_scaled_min_max 设缩放后最小尺寸
+    创建瞬间的 lift()/topmost 只顶到 withdraw 之前，拦不住 15ms 那次重新 map；
+    之前所有弹窗都出现在主窗口后面，就是这一条。
+    所以定位与提 z-order 一起延后到 deiconify 之后，走同一次 SetWindowPos（物理像素），
+    避开 CTk 的 DPI 换算与它的位置改写。
+
+    topmost 只保持到 700ms 就收回：目的是让窗口「弹出来那一下」绝不被压住，
+    之后仍靠 HWND_TOP 停在主窗口之上，不去长期压住别的程序。
+    刻意不用 transient()：加了之后窗口被钉在主窗口上、拖不到副屏。
+    """
+    try:
+        win.deiconify()
+        win.lift()
+        win.focus_force()
+        win.attributes("-topmost", True)
+    except Exception:
+        return
+
+    for ms in (50, 180, 360):
+        try:
+            win.after(ms, lambda: _center_window_native(win, master, True))
+        except Exception:
+            pass
+
+    try:
+        win.after(700, lambda: _release_topmost(win))
+        win.after(760, lambda: _raise_native(win))
+    except Exception:
+        pass
+
+
+def bring_to_front(win):
+    """
+    已开着的弹窗再次唤起：提到最前，不重新居中
+    —— 位置可能是用户自己摆到副屏去的，不该被拉回来。
+
+    同样要分拍：deiconify 那一刻的 z-order 由 Windows 决定，创建时的 lift() 靠不住。
+    """
+    try:
+        win.deiconify()
+        win.lift()
+        win.focus_force()
+        win.attributes("-topmost", True)
+    except Exception:
+        return win
+
+    for ms in (50, 220):
+        try:
+            win.after(ms, lambda: _raise_native(win))
+        except Exception:
+            pass
+
+    try:
+        win.after(520, lambda: _release_topmost(win))
+        win.after(580, lambda: _raise_native(win))
+    except Exception:
+        pass
+    return win
+
+
 def open_uds_window(master, app, live_tab):
     """打开 UDS 诊断窗口；已开着就提到前面"""
     win = getattr(live_tab, "uds_win", None)
     try:
         if win is not None and win.winfo_exists():
-            win.deiconify()
-            win.lift()
-            win.focus_force()
-            return win
+            return bring_to_front(win)
     except Exception:
         pass
     win = UdsWindow(master, app, live_tab)
     live_tab.uds_win = win
+    present_window(win, master)
     return win
 
 
@@ -4782,14 +4948,12 @@ def open_replay_window(master, app, live_tab):
     win = getattr(live_tab, "replay_win", None)
     try:
         if win is not None and win.winfo_exists():
-            win.deiconify()
-            win.lift()
-            win.focus_force()
-            return win
+            return bring_to_front(win)
     except Exception:
         pass
     win = ReplayWindow(master, app, live_tab)
     live_tab.replay_win = win
+    present_window(win, master)
     return win
 
 
@@ -4798,14 +4962,12 @@ def open_raw_send_window(master, app, live_tab):
     win = getattr(live_tab, "raw_send_win", None)
     try:
         if win is not None and win.winfo_exists():
-            win.deiconify()
-            win.lift()
-            win.focus_force()
-            return win
+            return bring_to_front(win)
     except Exception:
         pass
     win = RawSendWindow(master, app, live_tab)
     live_tab.raw_send_win = win
+    present_window(win, master)
     return win
 
 
@@ -4814,14 +4976,12 @@ def open_send_window(master, app, live_tab, parse_fn=None, pack_fn=None):
     win = getattr(live_tab, "send_win", None)
     try:
         if win is not None and win.winfo_exists():
-            win.deiconify()
-            win.lift()
-            win.focus_force()
-            return win
+            return bring_to_front(win)
     except Exception:
         pass
     win = SendWindow(master, app, live_tab, parse_fn, pack_fn)
     live_tab.send_win = win
+    present_window(win, master)
     return win
 
 

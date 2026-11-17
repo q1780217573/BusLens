@@ -1442,6 +1442,39 @@ class DbcParserApp(_AppBase):
         """双击导入记录 → 弹出解析结果窗口"""
         self._on_import_select(None)
 
+    def _present_popup(self, win):
+        """弹窗居中到主窗口并跳到前台
+
+        与实时页的 UDS / 发送 / 回放窗口共用同一套处理（live_monitor.present_window）：
+        CTk 建窗后 10ms withdraw、15ms deiconify 会把 z-order 重排回主窗口之下，
+        所以定位 + 提层必须延后到那一轮回调之后，且要分三拍。
+        以前这里用 wm_geometry 定位、再靠 topmost 顶 300ms，
+        结果是窗口出现在主窗口后面 —— 与发送窗口是同一个毛病。
+        """
+        try:
+            from live_monitor import present_window
+        except Exception:
+            present_window = None
+        if present_window is not None:
+            present_window(win, self)
+            return
+        try:
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            win.attributes("-topmost", True)
+            win.after(300, lambda: self._release_popup_topmost(win))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _release_popup_topmost(win):
+        try:
+            if win.winfo_exists():
+                win.attributes("-topmost", False)
+        except Exception:
+            pass
+
     def _show_parse_popup(self, mid, data):
         """在新窗口中显示解析结果，可复用窗口"""
         if mid not in self.messages:
@@ -1456,12 +1489,14 @@ class DbcParserApp(_AppBase):
             # 清空旧内容
             for w in popup.winfo_children():
                 w.destroy()
+            # 复用时也要提层：上次可能已被主窗口压到后面
+            self._present_popup(popup)
         else:
             popup = ctk.CTkToplevel(self)
             popup.title(f"解析: 0x{mid:X}  {msg['name']}")
             popup.geometry("650x450")
             popup.minsize(400, 250)
-            popup.attributes("-topmost", True)
+            self._present_popup(popup)
             self._popup = popup
             # 关闭时清理引用
             popup.protocol("WM_DELETE_WINDOW", lambda: self._popup.destroy() if hasattr(self, '_popup') else None)
