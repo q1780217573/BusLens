@@ -12,6 +12,7 @@
 """
 
 import csv
+import json
 import os
 import queue
 import threading
@@ -1889,6 +1890,10 @@ class UdsWindow(ctk.CTkToplevel):
                           font=("Microsoft YaHei UI", 11)
                           ).pack(side="left", padx=(0, 12))
 
+        ctk.CTkButton(r, text="复位布局", width=76, height=28,
+                      fg_color=c["neutral"], hover_color="#6B6B6B",
+                      font=("Microsoft YaHei UI", 11),
+                      command=self._reset_layout).pack(side="right", padx=(0, 8))
         ctk.CTkButton(r, text="清空日志", width=80, height=28,
                       fg_color=c["neutral"], hover_color="#6B6B6B",
                       font=("Microsoft YaHei UI", 11),
@@ -1919,13 +1924,13 @@ class UdsWindow(ctk.CTkToplevel):
 
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-        body.grid_columnconfigure(0, weight=2)
-        body.grid_columnconfigure(1, weight=7)
-        body.grid_rowconfigure(0, weight=1)
+        # 左（服务列表）/ 右（请求与日志）可拖拽分栏
+        self.h_paned = ttk.PanedWindow(body, orient="horizontal")
+        self.h_paned.pack(fill="both", expand=True)
 
         # 左：服务模板
-        left = ctk.CTkFrame(body, fg_color=c["card"], corner_radius=6)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        left = ctk.CTkFrame(self.h_paned, fg_color=c["card"], corner_radius=6)
+        self.h_paned.add(left, weight=0)
         self._label(left, "服务列表 · 点击填入请求 PDU", muted=False,
                     size=11, bold=True).pack(anchor="w", padx=10, pady=(8, 4))
         sc = ctk.CTkScrollableFrame(left, fg_color="transparent")
@@ -1947,8 +1952,8 @@ class UdsWindow(ctk.CTkToplevel):
                               ).pack(fill="x", pady=1)
 
         # 右：发送区 + 列表 + 日志
-        right = ctk.CTkFrame(body, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew")
+        right = ctk.CTkFrame(self.h_paned, fg_color="transparent")
+        self.h_paned.add(right, weight=1)
 
         # 服务参数区（选中左侧服务后动态重建）
         self.param_frame = ctk.CTkFrame(right, fg_color=c["card"],
@@ -2074,6 +2079,20 @@ class UdsWindow(ctk.CTkToplevel):
                                    text_color=c["muted"])
         self.status.pack(side="left")
         self._update_stats()
+
+        self._paneds = [(self.h_paned, "h")]
+        self._paned_defaults = [300]
+        bind_paned_save(self, "uds", self._paneds)
+        apply_paned_layout(self, "uds", self._paneds, self._paned_defaults)
+
+    def _reset_layout(self):
+        """恢复默认分栏与默认窗口尺寸，并清掉本窗口的存档"""
+        try:
+            reset_paned_layout(self, "uds", self._paneds,
+                               self._paned_defaults, "1120x720")
+            self._say("布局已恢复默认")
+        except Exception:
+            pass
 
     # ---------------- 订阅接收 ----------------
     def _subscribe(self):
@@ -2886,6 +2905,10 @@ class UdsWindow(ctk.CTkToplevel):
             pass
         self._unsubscribe()
         try:
+            save_paned_layout(self, "uds", self._paneds)
+        except Exception:
+            pass
+        try:
             self.destroy()
         except Exception:
             pass
@@ -3324,10 +3347,21 @@ class RawSendWindow(ctk.CTkToplevel):
     def _build(self):
         c = self.C
 
-        top = ctk.CTkFrame(self, fg_color=c["card"], corner_radius=6)
-        top.pack(fill="x", padx=10, pady=(10, 6))
-        self._label(top, "普通发送", size=12, muted=False, bold=True).pack(
-            anchor="w", padx=12, pady=(8, 2))
+        # 参数区与列表区分成可拖拽的上下两栏
+        vp = ctk.CTkFrame(self, fg_color="transparent")
+        vp.pack(fill="both", expand=True, padx=10, pady=(10, 6))
+        self.v_paned = ttk.PanedWindow(vp, orient="vertical")
+        self.v_paned.pack(fill="both", expand=True)
+
+        top = ctk.CTkFrame(self.v_paned, fg_color=c["card"], corner_radius=6)
+        self.v_paned.add(top, weight=0)
+        th = ctk.CTkFrame(top, fg_color="transparent")
+        th.pack(fill="x", padx=12, pady=(8, 2))
+        self._label(th, "普通发送", size=12, muted=False, bold=True).pack(side="left")
+        ctk.CTkButton(th, text="复位布局", width=76, height=24,
+                      fg_color=c["neutral"], hover_color="#6B6B6B",
+                      font=("Microsoft YaHei UI", 10),
+                      command=self._reset_layout).pack(side="right")
 
         # 行 1
         r1 = ctk.CTkFrame(top, fg_color="transparent")
@@ -3432,8 +3466,8 @@ class RawSendWindow(ctk.CTkToplevel):
         self.btn_send.pack(side="right")
 
         # ---- 列表发送 ----
-        mid = ctk.CTkFrame(self, fg_color=c["card"], corner_radius=6)
-        mid.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        mid = ctk.CTkFrame(self.v_paned, fg_color=c["card"], corner_radius=6)
+        self.v_paned.add(mid, weight=1)
         lh = ctk.CTkFrame(mid, fg_color="transparent")
         lh.pack(fill="x", padx=12, pady=(8, 4))
         self._label(lh, "列表发送", size=12, muted=False, bold=True).pack(side="left")
@@ -3512,6 +3546,20 @@ class RawSendWindow(ctk.CTkToplevel):
                                    font=("Microsoft YaHei UI", 11),
                                    text_color=c["muted"])
         self.status.pack(side="left", padx=(12, 10))
+
+        self._paneds = [(self.v_paned, "v")]
+        self._paned_defaults = [330]
+        bind_paned_save(self, "raw", self._paneds)
+        apply_paned_layout(self, "raw", self._paneds, self._paned_defaults)
+
+    def _reset_layout(self):
+        """恢复默认分栏与默认窗口尺寸，并清掉本窗口的存档"""
+        try:
+            reset_paned_layout(self, "raw", self._paneds,
+                               self._paned_defaults, "1180x680")
+            self._say("布局已恢复默认")
+        except Exception:
+            pass
 
     # ---------------- 数据长度 ----------------
     def _on_len(self):
@@ -3940,6 +3988,10 @@ class RawSendWindow(ctk.CTkToplevel):
     def _on_close(self):
         self._stop()
         try:
+            save_paned_layout(self, "raw", self._paneds)
+        except Exception:
+            pass
+        try:
             self.destroy()
         except Exception:
             pass
@@ -4050,6 +4102,10 @@ class SendWindow(ctk.CTkToplevel):
         self._label(bar, "通道", size=11).pack(side="left", padx=(12, 4), pady=8)
         self.chan_lbl = self._label(bar, "—", muted=False, size=11, bold=True)
         self.chan_lbl.pack(side="left")
+        ctk.CTkButton(bar, text="复位布局", width=76, height=24,
+                      fg_color=c["neutral"], hover_color="#6B6B6B",
+                      font=("Microsoft YaHei UI", 10),
+                      command=self._reset_layout).pack(side="left", padx=(14, 0), pady=10)
 
         # 右侧从右往左排：列表发送 / 循环发送 / 次数 / 模式
         self.btn_send = ctk.CTkButton(
@@ -4084,14 +4140,13 @@ class SendWindow(ctk.CTkToplevel):
         # ---- 主体 ----
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=10, pady=(0, 4))
-        body.grid_columnconfigure(0, weight=4)
-        body.grid_columnconfigure(1, weight=7)
-        body.grid_rowconfigure(0, weight=3)
-        body.grid_rowconfigure(1, weight=4)
+        # 左 / 右、右上 / 右下 都做成可拖拽分栏；位置按窗口名存进配置
+        self.h_paned = ttk.PanedWindow(body, orient="horizontal")
+        self.h_paned.pack(fill="both", expand=True)
 
         # 左：消息列表
-        left = ctk.CTkFrame(body, fg_color=c["card"], corner_radius=6)
-        left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 6))
+        left = ctk.CTkFrame(self.h_paned, fg_color=c["card"], corner_radius=6)
+        self.h_paned.add(left, weight=0)
         lh = ctk.CTkFrame(left, fg_color="transparent")
         lh.pack(fill="x", padx=8, pady=(8, 4))
         self._label(lh, "消息列表", muted=False, size=12, bold=True).pack(side="left")
@@ -4117,9 +4172,15 @@ class SendWindow(ctk.CTkToplevel):
         self.dbc_tree.bind("<Double-1>", self._on_dbc_dbl)
         self.dbc_tree.bind("<Button-3>", self._dbc_menu)
 
+        # 右侧容器：发送列表与信号表再分一次
+        rwrap = ctk.CTkFrame(self.h_paned, fg_color="transparent")
+        self.h_paned.add(rwrap, weight=1)
+        self.v_paned = ttk.PanedWindow(rwrap, orient="vertical")
+        self.v_paned.pack(fill="both", expand=True)
+
         # 右上：发送列表
-        rtop = ctk.CTkFrame(body, fg_color=c["card"], corner_radius=6)
-        rtop.grid(row=0, column=1, sticky="nsew")
+        rtop = ctk.CTkFrame(self.v_paned, fg_color=c["card"], corner_radius=6)
+        self.v_paned.add(rtop, weight=3)
         th = ctk.CTkFrame(rtop, fg_color="transparent")
         th.pack(fill="x", padx=8, pady=(8, 4))
         self._label(th, "发送列表", muted=False, size=12, bold=True).pack(side="left")
@@ -4164,8 +4225,8 @@ class SendWindow(ctk.CTkToplevel):
         self.send_tree.bind("<Double-1>", self._on_send_dbl)
 
         # 右下：信号
-        rbot = ctk.CTkFrame(body, fg_color=c["card"], corner_radius=6)
-        rbot.grid(row=1, column=1, sticky="nsew", pady=(6, 0))
+        rbot = ctk.CTkFrame(self.v_paned, fg_color=c["card"], corner_radius=6)
+        self.v_paned.add(rbot, weight=4)
         sh = ctk.CTkFrame(rbot, fg_color="transparent")
         sh.pack(fill="x", padx=8, pady=(8, 4))
         self.sig_hdr = self._label(sh, "信号", muted=False, size=12, bold=True)
@@ -4205,6 +4266,21 @@ class SendWindow(ctk.CTkToplevel):
 
         self._on_mode()
         self._sync_chan_label()
+
+        # 分栏：拖动时防抖保存，打开时套用上次的位置
+        self._paneds = [(self.h_paned, "h"), (self.v_paned, "v")]
+        self._paned_defaults = [430, 300]
+        bind_paned_save(self, "send", self._paneds)
+        apply_paned_layout(self, "send", self._paneds, self._paned_defaults)
+
+    def _reset_layout(self):
+        """恢复默认分栏与默认窗口尺寸，并清掉本窗口的存档"""
+        try:
+            reset_paned_layout(self, "send", self._paneds,
+                               self._paned_defaults, "1240x720")
+            self._say("布局已恢复默认")
+        except Exception:
+            pass
 
     def _sync_chan_label(self):
         try:
@@ -4771,9 +4847,150 @@ class SendWindow(ctk.CTkToplevel):
     def _on_close(self):
         self._stop()
         try:
+            save_paned_layout(self, "send", self._paneds)
+        except Exception:
+            pass
+        try:
             self.destroy()
         except Exception:
             pass
+
+
+# ------------------------- 窗口布局（分栏 + 尺寸） -------------------------
+# 各弹窗的 sash 位置与窗口尺寸统一存进 config.json，按窗口名分组：
+#   {"last_dbc": "...", "layout": {"parse": {...}, "send": {...}, "raw": {...}, "uds": {...}}}
+# 主程序只写自己的 "parse" 组；两边都是读-改-写，谁也不整块覆盖 layout，
+# 否则后写的会把先写的设置抹掉。
+
+def _cfg_path():
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "BusLens")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        d = os.path.dirname(os.path.abspath(sys.argv[0]))
+    return os.path.join(d, "config.json")
+
+
+def _cfg_read():
+    try:
+        with open(_cfg_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _cfg_write(cfg):
+    try:
+        with open(_cfg_path(), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def load_layout(key):
+    """取某个窗口的布局；数据坏了当没有，不影响启动"""
+    lay = _cfg_read().get("layout")
+    v = lay.get(key) if isinstance(lay, dict) else None
+    return v if isinstance(v, dict) else {}
+
+
+def save_layout(key, vals):
+    """读-改-写：只动自己这一组"""
+    cfg = _cfg_read()
+    lay = cfg.get("layout")
+    if not isinstance(lay, dict):
+        lay = {}
+    old = lay.get(key)
+    merged = dict(old) if isinstance(old, dict) else {}
+    merged.update(vals)
+    lay[key] = merged
+    cfg["layout"] = lay
+    _cfg_write(cfg)
+
+
+def drop_layout(key):
+    cfg = _cfg_read()
+    lay = cfg.get("layout")
+    if isinstance(lay, dict) and key in lay:
+        lay.pop(key, None)
+        cfg["layout"] = lay
+        _cfg_write(cfg)
+
+
+def apply_paned_layout(win, key, pairs, defaults):
+    """套用保存的分栏位置与窗口尺寸。
+
+    pairs = [(paned, 名字), ...]。sashpos 在窗口 map 之前无效，
+    CTk 建窗后还有一串延迟回调会把 sash 重排回去，所以分三拍，
+    最后一拍落在 1000ms 之后。
+    """
+    saved = load_layout(key)
+    g = saved.get("geom")
+    if isinstance(g, str) and g.strip():
+        try:
+            win.geometry(g)
+        except Exception:
+            pass
+
+    def put():
+        for (paned, name), dflt in zip(pairs, defaults):
+            try:
+                paned.sashpos(0, max(int(saved.get(name, dflt)), 120))
+            except Exception:
+                pass
+
+    for ms in (120, 500, 1100):
+        win.after(ms, put)
+
+
+def save_paned_layout(win, key, pairs):
+    """记录 sash 位置与当前窗口尺寸"""
+    vals = {}
+    for paned, name in pairs:
+        try:
+            vals[name] = int(paned.sashpos(0))
+        except Exception:
+            pass
+    try:
+        if win.winfo_exists() and win.state() == "normal":
+            vals["geom"] = win.geometry()
+    except Exception:
+        pass
+    if vals:
+        save_layout(key, vals)
+
+
+def bind_paned_save(win, key, pairs):
+    """拖 sash 时防抖保存：松手 400ms 后落盘，不是每移动一像素写一次文件"""
+    def _later(_e=None):
+        job = getattr(win, "_paned_job", None)
+        if job:
+            try:
+                win.after_cancel(job)
+            except Exception:
+                pass
+        win._paned_job = win.after(400, lambda: save_paned_layout(win, key, pairs))
+
+    for paned, _name in pairs:
+        paned.bind("<B1-Motion>", _later)
+        paned.bind("<ButtonRelease-1>", _later)
+
+
+def reset_paned_layout(win, key, pairs, defaults, geom=None):
+    """恢复默认分栏与默认尺寸，并清掉本窗口的存档"""
+    for (paned, _name), dflt in zip(pairs, defaults):
+        try:
+            paned.sashpos(0, dflt)
+        except Exception:
+            pass
+    if geom:
+        try:
+            win.geometry(geom)
+        except Exception:
+            pass
+    drop_layout(key)
 
 
 class _RECT(ctypes.Structure):

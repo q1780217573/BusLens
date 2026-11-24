@@ -990,43 +990,78 @@ class DbcParserApp(_AppBase):
         self._build_dbc_bar(tab)
         inner = ctk.CTkFrame(tab, fg_color="transparent")
         inner.pack(fill="both", expand=True)
-        inner.grid_columnconfigure(1, weight=1)
         inner.grid_rowconfigure(0, weight=1)
+        inner.grid_columnconfigure(0, weight=1)
+
+        # 左右分栏交给 PanedWindow：中间的 sash 可拖，宽度由用户定。
+        # 信号名太长就把左栏拉宽，不必再改代码。位置写进配置，下次打开照旧。
+        self.parse_paned = ttk.PanedWindow(inner, orient="horizontal")
+        self.parse_paned.grid(row=0, column=0, sticky="nsew")
 
         # 左侧：报文列表
-        left = ctk.CTkFrame(inner, width=272)
-        left.grid(row=0, column=0, sticky="ns", padx=(0, 4))
-        left.grid_propagate(False)
+        left = ctk.CTkFrame(self.parse_paned)
+        self.parse_paned.add(left, weight=0)
         ctk.CTkLabel(left, text="📋 报文列表", font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="w", padx=6, pady=(6, 2))
-        self.search_entry = ctk.CTkEntry(left, placeholder_text="搜索 ID 或名称…")
+        self.search_entry = ctk.CTkEntry(left, placeholder_text="搜索 ID / 报文名 / 信号名…")
         self.search_entry.pack(fill="x", padx=6, pady=2)
         self.search_entry.bind("<KeyRelease>", lambda e: self._filter_msgs())
 
+        expand_bar = ctk.CTkFrame(left, fg_color="transparent", height=26)
+        expand_bar.pack(fill="x", padx=6, pady=(0, 2))
+        ctk.CTkButton(expand_bar, text="展开全部", width=56, height=24,
+                      font=("Microsoft YaHei UI", 11),
+                      fg_color="#3A4553", hover_color="#4A5665",
+                      command=lambda: self._set_all_open(True)).pack(side="left")
+        ctk.CTkButton(expand_bar, text="折叠全部", width=56, height=24,
+                      font=("Microsoft YaHei UI", 11),
+                      fg_color="#3A4553", hover_color="#4A5665",
+                      command=lambda: self._set_all_open(False)).pack(side="left", padx=(5, 0))
+        ctk.CTkButton(expand_bar, text="复位布局", width=56, height=24,
+                      font=("Microsoft YaHei UI", 11),
+                      fg_color="#3A4553", hover_color="#4A5665",
+                      command=self._reset_layout).pack(side="left", padx=(5, 0))
+
         lc = ctk.CTkFrame(left)
         lc.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-        self.msg_tree = ttk.Treeview(lc, columns=("id", "name", "sc"), show="headings", height=20, selectmode="browse")
+        # 树形：报文是父节点，信号是子节点，子节点随报文一起插入、默认折叠。
+        # 上一版想"展开时再加载"，但 Tk 的 Treeview 只给已有子节点的行画展开箭头，
+        # 空节点连箭头都不出现，<<TreeviewOpen>> 永远等不到 —— 等于打不开。
+        # 实测库里最大 2005 信号 / 256 报文，一次性插入约百毫秒，加载时只做一次。
+        self.msg_tree = ttk.Treeview(lc, columns=("id", "name", "sc"),
+                                     show="tree headings", height=20,
+                                     selectmode="browse")
+        self.msg_tree.heading("#0", text="")
         self.msg_tree.heading("id", text="ID", anchor="w")
-        self.msg_tree.heading("name", text="报文名称", anchor="w")
+        self.msg_tree.heading("name", text="报文 / 信号", anchor="w")
         self.msg_tree.heading("sc", text="信号", anchor="center")
-        self.msg_tree.column("id", width=70, minwidth=55)
-        self.msg_tree.column("name", width=160, minwidth=100)
-        self.msg_tree.column("sc", width=45, minwidth=35, anchor="center")
+        self.msg_tree.column("#0", width=22, minwidth=18, stretch=False)
+        self.msg_tree.column("id", width=64, minwidth=52, stretch=False)
+        # name 列吃剩余宽度：左栏拉宽多少，信号名就能多显示多少
+        self.msg_tree.column("name", width=146, minwidth=96, stretch=True)
+        self.msg_tree.column("sc", width=40, minwidth=32, anchor="center", stretch=False)
+        self.msg_tree.tag_configure("sig", foreground="#7C8B9E")
         self.msg_tree.bind("<<TreeviewSelect>>", self._on_msg_select)
+        self.msg_tree.bind("<Double-1>", self._on_tree_dbl)
         vsb = ttk.Scrollbar(lc, orient="vertical", command=self.msg_tree.yview)
         self.msg_tree.configure(yscrollcommand=vsb.set)
         self.msg_tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
         # 右侧：上=单帧解析，下=日志导入。选 DBC → 导入 → 解析 全在这一页
-        right = ctk.CTkFrame(inner, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew")
-        right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(0, weight=5)
-        right.grid_rowconfigure(1, weight=5)
+        right = ctk.CTkFrame(self.parse_paned, fg_color="transparent")
+        self.parse_paned.add(right, weight=1)
+
+        # 上下再分一次：解析结果与日志列表都能按需要给高度
+        self.right_paned = ttk.PanedWindow(right, orient="vertical")
+        self.right_paned.pack(fill="both", expand=True)
+        # 拖 sash 时防抖保存；松手再存一次，防止最后一次移动没赶上
+        for _p in (self.parse_paned, self.right_paned):
+            _p.bind("<B1-Motion>", self._on_sash_moved)
+            _p.bind("<ButtonRelease-1>", self._on_sash_moved)
 
         # ---- 上：单帧解析 ----
-        top = ctk.CTkFrame(right)
-        top.grid(row=0, column=0, sticky="nsew", pady=(0, 3))
+        top = ctk.CTkFrame(self.right_paned)
+        self.right_paned.add(top, weight=5)
 
         inp = ctk.CTkFrame(top)
         inp.pack(fill="x")
@@ -1062,18 +1097,18 @@ class DbcParserApp(_AppBase):
         self.result_tree.heading("value", text="值", anchor="e")
         self.result_tree.heading("unit", text="单位", anchor="w")
         self.result_tree.heading("cmt", text="注释", anchor="w")
-        self.result_tree.column("name", width=170, minwidth=90)
-        self.result_tree.column("value", width=85, minwidth=50, anchor="e")
-        self.result_tree.column("unit", width=48, minwidth=30)
-        self.result_tree.column("cmt", width=150, minwidth=60)
+        self.result_tree.column("name", width=170, minwidth=90, stretch=True)
+        self.result_tree.column("value", width=85, minwidth=50, anchor="e", stretch=False)
+        self.result_tree.column("unit", width=48, minwidth=30, stretch=False)
+        self.result_tree.column("cmt", width=150, minwidth=60, stretch=False)
         rv = ttk.Scrollbar(rc, orient="vertical", command=self.result_tree.yview)
         self.result_tree.configure(yscrollcommand=rv.set)
         self.result_tree.pack(side="left", fill="both", expand=True)
         rv.pack(side="right", fill="y")
 
         # ---- 下：日志导入 ----
-        bot = ctk.CTkFrame(right)
-        bot.grid(row=1, column=0, sticky="nsew", pady=(3, 0))
+        bot = ctk.CTkFrame(self.right_paned)
+        self.right_paned.add(bot, weight=5)
 
         hd = ctk.CTkFrame(bot)
         hd.pack(fill="x", padx=8, pady=(6, 0))
@@ -1119,6 +1154,9 @@ class DbcParserApp(_AppBase):
             bot, text="支持 TRC / ASC / BLF / TXT / HEX　·　双击记录行 → 弹出解析窗口，可同时开多个对照",
             font=("Microsoft YaHei UI", 11), text_color="#888", anchor="w"
         ).pack(fill="x", padx=8, pady=(0, 6))
+
+        # 上一轮保存的分栏位置在这里落地（延迟两拍，等 CTk 自己布局完）
+        self._apply_layout()
 
     def _build_tab_convert(self):
         tab = self.tabs.add("转换", "convert")
@@ -1182,6 +1220,9 @@ class DbcParserApp(_AppBase):
             self.dbc_loaded, self.dbc_path = True, path
             self.dbc_var.set(path)
             self._save_cfg(path)
+            # 换 DBC 必须重建列表：缓存键含报文数，两个文件报文数相同时会被误判为"没变"
+            self._last_key = None
+            self.search_entry.delete(0, "end")
             self._refresh_msgs()
             self._clear_result()
             self._status(f"已加载 {len(msgs)} 条报文 — {os.path.basename(path)}")
@@ -1205,13 +1246,38 @@ class DbcParserApp(_AppBase):
         if p:
             self._load_dbc(p)
 
-    def _save_cfg(self, path):
+    # 布局默认值：左栏宽度 / 右侧上下分割位置（像素）
+    DEFAULT_LAYOUT = {"parse_sash": 292, "right_sash": 430}
+
+    def _cfg_all(self):
+        """读整份配置。文件坏了按空配置处理，不能因为一个坏 JSON 起不来"""
+        try:
+            if os.path.isfile(self.config_path):
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    if isinstance(d, dict):
+                        return d
+        except Exception:
+            pass
+        return {}
+
+    def _write_cfg(self, cfg):
         try:
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
             with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump({"last_dbc": os.path.abspath(path)}, f)
+                json.dump(cfg, f, ensure_ascii=False, indent=1)
         except Exception:
             pass
+
+    def _save_cfg(self, path):
+        """只更新 last_dbc，其余键（布局）原样保留
+
+        以前这里是整份覆盖写 {"last_dbc": ...}，一旦布局也存进同一个文件，
+        加载 DBC 就会把用户调好的分栏抹掉。
+        """
+        cfg = self._cfg_all()
+        cfg["last_dbc"] = os.path.abspath(path)
+        self._write_cfg(cfg)
 
     def _load_cfg(self):
         try:
@@ -1240,26 +1306,200 @@ class DbcParserApp(_AppBase):
         if p:
             self._load_dbc(p)
 
+    # ---------------- 可拖拽分栏 ----------------
+
+    def _layout_saved(self):
+        """读本窗口（parse）的分栏存档，兼容早期把 sash 直接放在 layout 根上的写法"""
+        lay = self._cfg_all().get("layout")
+        if not isinstance(lay, dict):
+            return {}
+        sub = lay.get("parse")
+        if isinstance(sub, dict):
+            return sub
+        return {k: lay[k] for k in ("parse_sash", "right_sash") if k in lay}
+
+    def _apply_layout(self):
+        """套用保存的分栏位置。
+
+        sashpos 在窗口 map 之前改不动；CTk 建窗后还有一串延迟回调
+        （10ms 改标题栏、200ms 设图标、1000ms 设缩放后最小尺寸），
+        每一次都可能让 PanedWindow 按请求宽度把 sash 重排回去 ——
+        只设一次会被吃掉，所以分三拍，最后一拍落在 1000ms 之后。
+        """
+        lay = dict(self.DEFAULT_LAYOUT)
+        saved = self._layout_saved()
+        for k in ("parse_sash", "right_sash"):
+            v = saved.get(k)
+            if isinstance(v, (int, float)):
+                lay[k] = int(v)
+
+        def _put():
+            try:
+                self.parse_paned.sashpos(0, max(int(lay["parse_sash"]), 180))
+                self.right_paned.sashpos(0, max(int(lay["right_sash"]), 120))
+            except Exception:
+                pass
+
+        for ms in (120, 500, 1100):
+            self.after(ms, _put)
+
+    def _save_layout(self):
+        """把当前 sash 位置写进配置的 parse 组
+
+        只写自己这一组：layout 下还有发送 / 普通发送 / UDS 窗口的存档，
+        整块覆盖会把它们一起抹掉。
+        """
+        try:
+            cfg = self._cfg_all()
+            lay = cfg.get("layout")
+            if not isinstance(lay, dict):
+                lay = {}
+            lay["parse"] = {"parse_sash": int(self.parse_paned.sashpos(0)),
+                            "right_sash": int(self.right_paned.sashpos(0))}
+            cfg["layout"] = lay
+            self._write_cfg(cfg)
+        except Exception:
+            pass
+
+    def _on_sash_moved(self, event=None):
+        """拖动过程中防抖：松手 400ms 后落盘，不是每移动一像素写一次文件"""
+        job = getattr(self, "_layout_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+        try:
+            self._layout_job = self.after(400, self._save_layout)
+        except Exception:
+            self._layout_job = None
+
+    def _reset_layout(self):
+        """恢复默认分栏，并只清掉本窗口的存档"""
+        try:
+            self.parse_paned.sashpos(0, self.DEFAULT_LAYOUT["parse_sash"])
+            self.right_paned.sashpos(0, self.DEFAULT_LAYOUT["right_sash"])
+        except Exception:
+            pass
+        cfg = self._cfg_all()
+        lay = cfg.get("layout")
+        if isinstance(lay, dict):
+            lay.pop("parse", None)
+            lay.pop("parse_sash", None)      # 早期扁平结构一并清掉
+            lay.pop("right_sash", None)
+            cfg["layout"] = lay
+            self._write_cfg(cfg)
+        self._status("分栏已恢复默认")
+
 
     def _refresh_msgs(self, flt=""):
-        self.msg_tree.delete(*self.msg_tree.get_children())
-        flt = flt.lower()
+        """重建报文列表（报文 = 父节点，信号 = 子节点）。
+
+        子节点随报文一起插入、默认折叠，点箭头或双击即可展开看信号名。
+        不做"展开时再加载"：Tk 的 Treeview 只给已有子节点的行画展开箭头，
+        空节点连箭头都不出现，<<TreeviewOpen>> 永远等不到，等于打不开。
+
+        搜索：
+          命中报文（ID / 十六进制 ID / 报文名）→ 列出报文，带全部信号，折叠
+          命中信号名 → 列出所属报文并展开，只显示命中的信号
+        匹配是"或"关系；同一个词重复触发不重建。
+        """
+        tree = self.msg_tree
+        flt = (flt or "").strip().lower()
+        key = (flt, len(self.messages))
+        if key == getattr(self, "_last_key", None) and tree.get_children():
+            return
+        self._last_key = key
+
+        tree.delete(*tree.get_children())
+        n_msg = n_sig = 0
+
         for mid, msg in sorted(self.messages.items()):
             h = f"0x{mid:X}"
-            if flt and flt not in str(mid) and flt not in h.lower() and flt not in msg["name"].lower():
-                continue
-            self.msg_tree.insert("", "end", iid=str(mid), values=(h, msg["name"], len(msg["signals"])))
+            name = msg["name"]
+            sigs = msg["signals"]
+            if not flt:
+                msg_hit, sig_hits = True, []
+            else:
+                msg_hit = flt in str(mid) or flt in h.lower() or flt in name.lower()
+                sig_hits = [i for i, s in enumerate(sigs)
+                            if flt in s["name"].lower()]
+                if not msg_hit and not sig_hits:
+                    continue
+
+            node = tree.insert("", "end", iid=str(mid),
+                               values=(h, name, len(sigs)),
+                               open=bool(sig_hits))
+            n_msg += 1
+            # 命中信号只铺命中的那几个；否则铺全部，保证每行都有展开箭头
+            for i in (sig_hits or range(len(sigs))):
+                sig = sigs[i]
+                tree.insert(node, "end", iid=f"s:{mid}:{i}",
+                            values=("", "   " + sig["name"],
+                                    sig.get("unit", "")),
+                            tags=("sig",))
+            n_sig += len(sig_hits)
+
+        if flt:
+            self._status(f"搜索「{flt}」— 报文 {n_msg} 个，信号命中 {n_sig} 条")
 
     def _filter_msgs(self):
         self._refresh_msgs(self.search_entry.get())
+
+    def _set_all_open(self, flag):
+        """全部展开 / 全部折叠"""
+        for iid in self.msg_tree.get_children():
+            try:
+                self.msg_tree.item(iid, open=flag)
+            except tk.TclError:
+                pass
+
+    def _on_tree_dbl(self, event):
+        """双击报文行 = 展开/折叠该报文（信号行不响应，交给单击选中）"""
+        iid = self.msg_tree.identify_row(event.y)
+        if not iid or iid.startswith("s:"):
+            return
+        try:
+            self.msg_tree.item(iid, open=not bool(self.msg_tree.item(iid, "open")))
+        except tk.TclError:
+            pass
+        return "break"
 
     def _on_msg_select(self, event):
         sel = self.msg_tree.selection()
         if not sel:
             return
-        self.id_var.set(f"0x{int(sel[0]):X}")
+        iid = sel[0]
+        sig_name = None
+        if iid.startswith("s:"):
+            _, mid_s, idx_s = iid.split(":", 2)
+            mid = int(mid_s)
+            try:
+                sig_name = self.messages[mid]["signals"][int(idx_s)]["name"]
+            except (KeyError, IndexError):
+                sig_name = None
+        else:
+            try:
+                mid = int(iid)
+            except ValueError:
+                return
+        self.id_var.set(f"0x{mid:X}")
         self.complete_lbl.configure(text="")
+        if sig_name:
+            self._highlight_result_sig(sig_name)
         self.data_entry.focus()
+
+    def _highlight_result_sig(self, name):
+        """选中的信号若已经出现在解析结果里，就选中它并滚进视野"""
+        tree = self.result_tree
+        for iid in tree.get_children():
+            try:
+                if tree.set(iid, "name") == name:
+                    tree.selection_set(iid)
+                    tree.see(iid)
+                    return
+            except tk.TclError:
+                continue
 
     # =============== ID 自动补全 ===============
 
@@ -1277,7 +1517,19 @@ class DbcParserApp(_AppBase):
             if tl in h.lower() or tl in str(mid) or tl in msg["name"].lower():
                 ms.append((h, msg["name"]))
         if not ms:
-            self.complete_lbl.configure(text="")
+            # 不匹配任何报文时，按信号名再找一遍：手输的多半是信号名
+            sig_hits = []
+            for mid, msg in self.messages.items():
+                for sig in msg["signals"]:
+                    if tl in sig["name"].lower():
+                        sig_hits.append((f"0x{mid:X}", sig["name"]))
+                        if len(sig_hits) >= 5:
+                            break
+                if len(sig_hits) >= 5:
+                    break
+            self.complete_lbl.configure(
+                text=("  信号: " + " | ".join(f"{n} @ {h}" for h, n in sig_hits))
+                if sig_hits else "")
         elif len(ms) == 1:
             h, n = ms[0]
             self.complete_lbl.configure(text=f"  → {h}  {n}" if h.lower() != tl else f"  {h}  {n}")
