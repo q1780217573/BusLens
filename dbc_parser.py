@@ -39,7 +39,7 @@ if HAS_DND:
             setattr(tk.BaseWidget, _meth,
                     getattr(TkinterDnD.DnDWrapper, _meth))
 
-__version__ = "3.2"
+__version__ = "3.2.1"
 
 # 尝试导入 python-can
 try:
